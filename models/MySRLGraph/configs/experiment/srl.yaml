@@ -1,0 +1,34 @@
+# @package _global_
+general:
+    name: 'srl_edge_diffusion'
+    gpus: 1
+    wandb: 'online'
+    test_only: null
+    check_val_every_n_epochs: 5
+    sample_every_val: 10
+    samples_to_generate: 32
+    samples_to_save: 10
+    chains_to_save: 1
+    log_every_steps: 50
+
+train:
+    n_epochs: 500
+    batch_size: 32
+    save_model: True
+    lr: 1e-4
+    num_workers: 4
+
+model:
+    n_layers: 6
+    type: 'discrete'
+    transition: 'marginal'
+    diffusion_steps: 500
+    diffusion_noise_schedule: 'cosine'
+    extra_features: null
+    edge_only: true
+
+    hidden_mlp_dims: {'X': 256, 'E': 128, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 128, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
+
+dataset:
+    name: 'srl_propbank'
