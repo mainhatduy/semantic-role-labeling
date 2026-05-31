@@ -1,9 +1,11 @@
 name: 'srl_propbank'
 datadir: '../../dataset/propbank'
 train_file: 'train.jsonl'
+val_file: 'val.jsonl'
+test_file: 'test.jsonl'
 roles_file: 'unique_roles.json'
 max_seq_len: 64
 embedding_model: 'FacebookAI/xlm-roberta-base'
 embedding_dim: 768
-split_ratios: [0.8, 0.1, 0.1]
 pin_memory: False
+

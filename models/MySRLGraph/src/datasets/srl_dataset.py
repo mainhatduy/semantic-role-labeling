@@ -44,6 +44,30 @@ class SRLGraphDataset(InMemoryDataset):
             self.role_to_idx[role] = i + 1
         self.num_edge_classes = len(self.role_to_idx)  # 58 (0=No-Edge + 57 roles)
 
+        # Reuse existing processed train/full files if available to avoid re-generating
+        if self.split == 'train':
+            processed_dir = os.path.join(root, 'processed')
+            train_pt = os.path.join(processed_dir, 'srl_train.pt')
+            full_pt = os.path.join(processed_dir, 'srl_full.pt')
+            if not os.path.exists(train_pt) and os.path.exists(full_pt):
+                print(f"Found existing srl_full.pt, creating a link to srl_train.pt to avoid reprocessing...")
+                os.makedirs(processed_dir, exist_ok=True)
+                try:
+                    os.link(full_pt, train_pt)
+                except Exception:
+                    import shutil
+                    shutil.copy(full_pt, train_pt)
+
+            cache_train = os.path.join(root, 'embeddings_cache_train.pt')
+            cache_full = os.path.join(root, 'embeddings_cache.pt')
+            if not os.path.exists(cache_train) and os.path.exists(cache_full):
+                print(f"Found existing embeddings_cache.pt, creating a link to embeddings_cache_train.pt...")
+                try:
+                    os.link(cache_full, cache_train)
+                except Exception:
+                    import shutil
+                    shutil.copy(cache_full, cache_train)
+
         super().__init__(root, transform, pre_transform)
         self.load(self.processed_paths[0])
 
@@ -62,7 +86,8 @@ class SRLGraphDataset(InMemoryDataset):
                 sentences.append(json.loads(line.strip()))
 
         # Compute or load cached embeddings
-        embeddings_cache = os.path.join(self.root, 'embeddings_cache.pt')
+        cache_name = 'embeddings_cache.pt' if self.split == 'full' else f'embeddings_cache_{self.split}.pt'
+        embeddings_cache = os.path.join(self.root, cache_name)
         if os.path.exists(embeddings_cache):
             print(f"Loading cached embeddings from {embeddings_cache}")
             all_embeddings = torch.load(embeddings_cache, weights_only=True)
@@ -222,7 +247,6 @@ class SRLDataModule(LightningDataset):
         # Resolve paths relative to the project root
         project_root = Path(__file__).resolve().parents[2]  # models/MySRLGraph/ level
         data_dir = project_root / dataset_cfg.datadir
-        jsonl_path = str(data_dir / dataset_cfg.train_file)
         roles_path = str(data_dir / dataset_cfg.roles_file)
 
         processed_root = str(project_root / 'processed_data')
@@ -231,33 +255,79 @@ class SRLDataModule(LightningDataset):
         embedding_model = getattr(dataset_cfg, 'embedding_model', 'FacebookAI/xlm-roberta-base')
         embedding_dim = getattr(dataset_cfg, 'embedding_dim', 768)
 
-        # Build full dataset
-        full_dataset = SRLGraphDataset(
-            root=processed_root,
-            jsonl_path=jsonl_path,
-            roles_path=roles_path,
-            max_seq_len=max_seq_len,
-            embedding_model=embedding_model,
-            embedding_dim=embedding_dim,
-            split='full',
-        )
+        # Check if val_file and test_file are specified or if they exist in dataset directory
+        val_file = getattr(dataset_cfg, 'val_file', None)
+        if val_file is None and (data_dir / 'val.jsonl').exists():
+            val_file = 'val.jsonl'
+        test_file = getattr(dataset_cfg, 'test_file', None)
+        if test_file is None and (data_dir / 'test.jsonl').exists():
+            test_file = 'test.jsonl'
 
-        # Split into train/val/test
-        split_ratios = getattr(dataset_cfg, 'split_ratios', [0.8, 0.1, 0.1])
-        total = len(full_dataset)
-        train_size = int(total * split_ratios[0])
-        val_size = int(total * split_ratios[1])
-        test_size = total - train_size - val_size
+        if val_file is not None:
+            print(f"Loading separate datasets: train={dataset_cfg.train_file}, val={val_file}, test={test_file}")
+            train_dataset = SRLGraphDataset(
+                root=processed_root,
+                jsonl_path=str(data_dir / dataset_cfg.train_file),
+                roles_path=roles_path,
+                max_seq_len=max_seq_len,
+                embedding_model=embedding_model,
+                embedding_dim=embedding_dim,
+                split='train',
+            )
+            val_dataset = SRLGraphDataset(
+                root=processed_root,
+                jsonl_path=str(data_dir / val_file),
+                roles_path=roles_path,
+                max_seq_len=max_seq_len,
+                embedding_model=embedding_model,
+                embedding_dim=embedding_dim,
+                split='val',
+            )
+            if test_file is not None:
+                test_dataset = SRLGraphDataset(
+                    root=processed_root,
+                    jsonl_path=str(data_dir / test_file),
+                    roles_path=roles_path,
+                    max_seq_len=max_seq_len,
+                    embedding_model=embedding_model,
+                    embedding_dim=embedding_dim,
+                    split='test',
+                )
+            else:
+                test_dataset = val_dataset
 
-        # Use a fixed generator for reproducibility
-        generator = torch.Generator().manual_seed(42)
-        train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size, test_size], generator=generator
-        )
+            self.full_dataset = train_dataset
+            self.num_edge_classes = train_dataset.num_edge_classes
+        else:
+            print("No separate val_file found. Splitting train_file randomly.")
+            jsonl_path = str(data_dir / dataset_cfg.train_file)
+            full_dataset = SRLGraphDataset(
+                root=processed_root,
+                jsonl_path=jsonl_path,
+                roles_path=roles_path,
+                max_seq_len=max_seq_len,
+                embedding_model=embedding_model,
+                embedding_dim=embedding_dim,
+                split='full',
+            )
+
+            # Split into train/val/test
+            split_ratios = getattr(dataset_cfg, 'split_ratios', [0.8, 0.1, 0.1])
+            total = len(full_dataset)
+            train_size = int(total * split_ratios[0])
+            val_size = int(total * split_ratios[1])
+            test_size = total - train_size - val_size
+
+            # Use a fixed generator for reproducibility
+            generator = torch.Generator().manual_seed(42)
+            train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(
+                full_dataset, [train_size, val_size, test_size], generator=generator
+            )
+
+            self.full_dataset = full_dataset
+            self.num_edge_classes = full_dataset.num_edge_classes
 
         self.cfg = cfg
-        self.num_edge_classes = full_dataset.num_edge_classes
-        self.full_dataset = full_dataset
 
         super().__init__(
             train_dataset=train_dataset,
