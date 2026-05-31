@@ -4,7 +4,7 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import wandb
 
 from models.transformer_model import GraphTransformer
@@ -65,7 +65,8 @@ class LiftedDenoisingDiffusion(pl.LightningModule):
         self.sampling_metrics = sampling_metrics
         self.visualization_tools = visualization_tools
 
-        self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
+        self.save_hyperparameters(ignore=['dataset_infos', 'train_metrics', 'sampling_metrics',
+                                          'visualization_tools', 'extra_features', 'domain_features'])
         self.visualization_tools = visualization_tools
 
         self.model = GraphTransformer(n_layers=cfg.model.n_layers,
@@ -75,8 +76,6 @@ class LiftedDenoisingDiffusion(pl.LightningModule):
                                       output_dims=output_dims,
                                       act_fn_in=nn.ReLU(),
                                       act_fn_out=nn.ReLU())
-
-        self.save_hyperparameters()
 
         self.start_epoch_time = None
         self.train_iterations = None

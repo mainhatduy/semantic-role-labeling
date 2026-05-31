@@ -1,0 +1,7 @@
+dataset/*
+*.venv
+models/DiGress
+*__pycache__
+models/MySRLGraph/processed_data/*
+models/outputs/*
+.env

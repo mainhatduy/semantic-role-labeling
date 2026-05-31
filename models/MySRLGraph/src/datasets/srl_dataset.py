@@ -220,7 +220,7 @@ class SRLDataModule(LightningDataset):
         dataset_cfg = cfg.dataset
 
         # Resolve paths relative to the project root
-        project_root = Path(__file__).resolve().parents[3]  # models/MySRLGraph/ level
+        project_root = Path(__file__).resolve().parents[2]  # models/MySRLGraph/ level
         data_dir = project_root / dataset_cfg.datadir
         jsonl_path = str(data_dir / dataset_cfg.train_file)
         roles_path = str(data_dir / dataset_cfg.roles_file)

@@ -1,15 +1,17 @@
-import graph_tool as gt
 import os
 import pathlib
 import warnings
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import torch
 torch.cuda.empty_cache()
 import hydra
 from omegaconf import DictConfig
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.utilities.warnings import PossibleUserWarning
+from lightning.pytorch import Trainer
+from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.utilities.warnings import PossibleUserWarning
 
 from src import utils
 from metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstractMetrics
@@ -70,6 +72,7 @@ def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
 
     if dataset_config["name"] in ['sbm', 'comm20', 'planar']:
+        import graph_tool as gt
         from datasets.spectre_dataset import SpectreGraphDataModule, SpectreDatasetInfos
         from analysis.spectre_utils import PlanarSamplingMetrics, SBMSamplingMetrics, Comm20SamplingMetrics
         from analysis.visualization import NonMolecularVisualization
@@ -143,6 +146,28 @@ def main(cfg: DictConfig):
         # We do not evaluate novelty during training
         sampling_metrics = SamplingMolecularMetrics(dataset_infos, train_smiles)
         visualization_tools = MolecularVisualization(cfg.dataset.remove_h, dataset_infos=dataset_infos)
+
+        model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
+                        'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
+                        'extra_features': extra_features, 'domain_features': domain_features}
+    elif dataset_config["name"] == 'srl_propbank':
+        from datasets.srl_dataset import SRLDataModule, SRLDatasetInfos
+        from metrics.srl_metrics import SRLSamplingMetrics
+        from metrics.train_metrics import TrainLossEdgeOnly
+        from diffusion.extra_features import DummyExtraFeatures
+
+        datamodule = SRLDataModule(cfg)
+        dataset_infos = SRLDatasetInfos(datamodule, cfg)
+
+        extra_features = DummyExtraFeatures()
+        domain_features = DummyExtraFeatures()
+
+        dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
+                                                domain_features=domain_features)
+
+        train_metrics = TrainAbstractMetricsDiscrete()
+        sampling_metrics = SRLSamplingMetrics(dataset_infos)
+        visualization_tools = None
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,

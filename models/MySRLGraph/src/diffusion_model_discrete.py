@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import time
 import wandb
 import os
@@ -97,7 +97,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / max(1, self.ydim_output))
 
-        self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
+        self.save_hyperparameters(ignore=['dataset_infos', 'train_metrics', 'sampling_metrics',
+                                          'visualization_tools', 'extra_features', 'domain_features'])
         self.start_epoch_time = None
         self.train_iterations = None
         self.val_iterations = None

@@ -69,6 +69,8 @@ Quá trình huấn luyện sử dụng **Hydra** để cấu hình và **PyTorch
 Để huấn luyện với cấu hình thí nghiệm SRL mặc định (500 epochs, batch size 32, lưu checkpoint tự động):
 ```bash
 python src/main.py +experiment=srl
+
+PYTHONPATH=. python src/main.py +experiment=srl
 ```
 
 ### Huấn luyện trên CPU (Không dùng GPU)
