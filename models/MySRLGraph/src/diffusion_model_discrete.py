@@ -11,7 +11,7 @@ from diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseS
     MarginalUniformTransition
 from src.diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete, TrainLossEdgeOnly
-from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
+from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL, get_alpha_weights
 from src import utils
 
 
@@ -39,9 +39,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         self.dataset_info = dataset_infos
 
-        if getattr(self.cfg.model, 'edge_only', False):
-            self.train_loss = TrainLossEdgeOnly()
-        else:
+        if not getattr(self.cfg.model, 'edge_only', False):
             self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train)
 
         self.val_nll = NLL()
@@ -96,6 +94,14 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                                               y_classes=self.ydim_output)
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / max(1, self.ydim_output))
+
+        # Create edge-only train loss AFTER e_marginals is available
+        if getattr(self.cfg.model, 'edge_only', False):
+            if cfg.model.transition == 'marginal':
+                alpha = get_alpha_weights(e_marginals)
+            else:
+                alpha = None  # uniform transition — no class weighting
+            self.train_loss = TrainLossEdgeOnly(alpha=alpha, gamma=2.0)
 
         self.save_hyperparameters(ignore=['dataset_infos', 'train_metrics', 'sampling_metrics',
                                           'visualization_tools', 'extra_features', 'domain_features'])

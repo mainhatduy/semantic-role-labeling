@@ -7,5 +7,5 @@ roles_file: 'unique_roles.json'
 max_seq_len: 64
 embedding_model: 'FacebookAI/xlm-roberta-base'
 embedding_dim: 768
-pin_memory: False
+pin_memory: True
 

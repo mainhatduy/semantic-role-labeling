@@ -5,7 +5,7 @@ from torchmetrics import Metric, MeanSquaredError, MetricCollection
 import time
 import wandb
 from src.metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchMSE, SumExceptBatchKL, CrossEntropyMetric, \
-    ProbabilityMetric, NLL
+    ProbabilityMetric, NLL, FocalLossMetric
 
 
 class NodeMSE(MeanSquaredError):
@@ -125,10 +125,10 @@ class TrainLossDiscrete(nn.Module):
 
 
 class TrainLossEdgeOnly(nn.Module):
-    """Train with Cross entropy on edges only — for SRL edge-only diffusion."""
-    def __init__(self):
+    """Train with Focal Loss on edges only — for SRL edge-only diffusion."""
+    def __init__(self, alpha: torch.Tensor = None, gamma: float = 2.0):
         super().__init__()
-        self.edge_loss = CrossEntropyMetric()
+        self.edge_loss = FocalLossMetric(alpha=alpha, gamma=gamma)
 
     def forward(self, masked_pred_X, masked_pred_E, pred_y, true_X, true_E, true_y, log: bool):
         """Compute edge-only loss. Other args are kept for API compatibility but ignored."""

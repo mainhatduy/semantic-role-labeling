@@ -4,7 +4,7 @@ general:
     gpus: 1
     wandb: 'online'
     test_only: null
-    check_val_every_n_epochs: 5
+    check_val_every_n_epochs: 2
     sample_every_val: 10
     samples_to_generate: 32
     samples_to_save: 10
@@ -22,7 +22,7 @@ model:
     n_layers: 6
     type: 'discrete'
     transition: 'marginal'
-    diffusion_steps: 500
+    diffusion_steps: 100
     diffusion_noise_schedule: 'cosine'
     extra_features: null
     edge_only: true

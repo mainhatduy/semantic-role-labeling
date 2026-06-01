@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import torch
+torch.set_float32_matmul_precision('high')
 torch.cuda.empty_cache()
 import hydra
 from omegaconf import DictConfig
