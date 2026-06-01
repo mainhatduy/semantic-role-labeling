@@ -18,14 +18,6 @@ train:
     lr: 1e-4
     num_workers: 4
 
-    # --- Two-stage joint fine-tuning ---
-    # Set joint_finetune_epoch to the epoch at which the embedding model is
-    # unfrozen for joint training with the GraphTransformer.
-    # Leave as null to disable (stage-1 only, cached embeddings).
-    joint_finetune_epoch: null        # e.g. 200 — unfreeze at epoch 200
-    joint_finetune_lr_ratio: 0.1     # embedding LR = base_lr * ratio (e.g. 1e-5)
-    joint_finetune_warmup_epochs: 1  # (reserved for future LR warm-up)
-
 model:
     n_layers: 6
     type: 'discrete'

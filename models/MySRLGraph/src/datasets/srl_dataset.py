@@ -1,12 +1,19 @@
 """
 SRL Graph Dataset — PropBank JSONL → PyG Data objects.
 
-Each sentence with P predicates produces P separate Data objects (Option B):
+Each sentence produces exactly ONE Data object (1 sentence = 1 graph):
     - data.x: XLM-RoBERTa embeddings (N, 768) — continuous, frozen
-    - data.edge_index: sparse directed edges (2, num_edges)
+    - data.edge_index: sparse directed edges (2, num_edges) — ALL predicate→arg edges
     - data.edge_attr: one-hot edge labels (num_edges, num_edge_classes)
     - data.y: empty global features (1, 0)
-    - data.predicate_mask: boolean mask (N,) indicating the predicate word
+    - data.predicate_mask: multi-hot boolean mask (N,) — True for every predicate word
+      E[i][j] = role_label  if word[i] is a predicate and word[j] is its argument
+      E[i][j] = 0 (No-Edge) otherwise
+
+Joint fine-tuning mode (SRLGraphDatasetWithTokens):
+    - data.input_ids: token ids for online re-embedding (1, seq_len)
+    - data.word_starts / data.word_ends: subword → word span boundaries (N, max_subwords)
+    The embedding model is re-run every forward pass, enabling joint optimization.
 """
 
 import os
@@ -69,7 +76,7 @@ class SRLGraphDataset(InMemoryDataset):
                     shutil.copy(cache_full, cache_train)
 
         super().__init__(root, transform, pre_transform)
-        self.load(self.processed_paths[0])
+        self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
 
     @property
     def processed_file_names(self):
@@ -97,7 +104,7 @@ class SRLGraphDataset(InMemoryDataset):
             torch.save(all_embeddings, embeddings_cache)
             print(f"Cached embeddings to {embeddings_cache}")
 
-        # Build Data objects
+        # Build Data objects — 1 sentence = 1 graph
         data_list = []
         skipped = 0
 
@@ -121,14 +128,19 @@ class SRLGraphDataset(InMemoryDataset):
                 skipped += 1
                 continue
 
-            # For each predicate, create a separate Data object
+            # Collect ALL edges from ALL predicates into one edge list.
+            # E[i][j] = role_label  if word[i] is a predicate and word[j] is its argument
+            # E[i][j] = 0 (No-Edge) otherwise — no collisions since each predicate is a unique row.
+            edge_index_list = []
+            edge_attr_list = []
+            predicate_mask = torch.zeros(n_words, dtype=torch.bool)  # multi-hot
+
             for pred_info in sentence.get('predicates', []):
                 pred_idx = pred_info['predicate_index']
                 if pred_idx >= n_words:
                     continue
 
-                edge_index_list = []
-                edge_attr_list = []
+                predicate_mask[pred_idx] = True  # mark every predicate word
 
                 for arg in pred_info.get('argument_spans', []):
                     arg_idx = arg['token_index']
@@ -143,36 +155,34 @@ class SRLGraphDataset(InMemoryDataset):
                     edge_index_list.append([pred_idx, arg_idx])
                     edge_attr_list.append(role_idx)
 
-                # Build sparse edge representation
-                if len(edge_index_list) > 0:
-                    edge_index = torch.tensor(edge_index_list, dtype=torch.long).T  # (2, E)
-                    edge_attr = F.one_hot(
-                        torch.tensor(edge_attr_list, dtype=torch.long),
-                        num_classes=self.num_edge_classes
-                    ).float()  # (E, 58)
-                else:
-                    edge_index = torch.zeros((2, 0), dtype=torch.long)
-                    edge_attr = torch.zeros((0, self.num_edge_classes), dtype=torch.float)
 
-                # Predicate mask
-                predicate_mask = torch.zeros(n_words, dtype=torch.bool)
-                predicate_mask[pred_idx] = True
+            # Build sparse edge representation
+            if len(edge_index_list) > 0:
+                edge_index = torch.tensor(edge_index_list, dtype=torch.long).T  # (2, E)
+                edge_attr = F.one_hot(
+                    torch.tensor(edge_attr_list, dtype=torch.long),
+                    num_classes=self.num_edge_classes
+                ).float()  # (E, num_edge_classes)
+            else:
+                # Predicates exist but none have arguments (e.g. "be" with no args)
+                edge_index = torch.zeros((2, 0), dtype=torch.long)
+                edge_attr = torch.zeros((0, self.num_edge_classes), dtype=torch.float)
 
-                # Empty global features
-                y = torch.zeros(1, 0)
+            # Empty global features
+            y = torch.zeros(1, 0)
 
-                data = Data(
-                    x=X.clone(),
-                    edge_index=edge_index,
-                    edge_attr=edge_attr,
-                    y=y,
-                    predicate_mask=predicate_mask,
-                )
-                data_list.append(data)
+            data = Data(
+                x=X.clone(),
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                y=y,
+                predicate_mask=predicate_mask,  # multi-hot: True for each predicate word
+            )
+            data_list.append(data)
 
-        print(f"Built {len(data_list)} graph samples ({skipped} sentences skipped due to length)")
+        print(f"Built {len(data_list)} graph samples ({skipped} sentences skipped)")
 
-        self.save(data_list, self.processed_paths[0])
+        torch.save(self.collate(data_list), self.processed_paths[0])
 
     def _compute_embeddings(self, sentences):
         """Compute XLM-RoBERTa word-level embeddings with subword averaging."""
@@ -238,8 +248,179 @@ class SRLGraphDataset(InMemoryDataset):
         return all_embeddings
 
 
+# ---------------------------------------------------------------------------
+# Joint fine-tuning dataset: stores token ids + word boundaries for online
+# re-embedding. Works as a wrapper over the processed Data objects.
+# ---------------------------------------------------------------------------
+
+class SRLGraphDatasetWithTokens(SRLGraphDataset):
+    """
+    Extends SRLGraphDataset by also saving tokenizer outputs (input_ids,
+    attention_mask, and word-boundary spans) into every Data object.
+
+    When joint_finetune=True, the embedding model recomputes embeddings
+    from these ids every forward pass so that gradients flow into it.
+    The cached `data.x` is kept as a fallback for stage-1 (frozen) mode.
+    """
+
+    # Override processed file names so we write a separate .pt file
+    @property
+    def processed_file_names(self):
+        return [f'srl_{self.split}_with_tokens.pt']
+
+    def process(self):
+        """Parse JSONL, build PyG Data objects that carry both cached
+        embeddings AND token ids for online re-embedding."""
+        from transformers import AutoTokenizer
+
+        print(f"Processing SRL dataset (with tokens) from {self.jsonl_path}...")
+
+        tokenizer = AutoTokenizer.from_pretrained(self.embedding_model)
+
+        # Load sentences
+        sentences = []
+        with open(self.jsonl_path, 'r') as f:
+            for line in f:
+                sentences.append(json.loads(line.strip()))
+
+        # Compute or load cached embeddings (same logic as parent)
+        cache_name = 'embeddings_cache.pt' if self.split == 'full' else f'embeddings_cache_{self.split}.pt'
+        embeddings_cache = os.path.join(self.root, cache_name)
+        if os.path.exists(embeddings_cache):
+            print(f"Loading cached embeddings from {embeddings_cache}")
+            all_embeddings = torch.load(embeddings_cache, weights_only=True)
+        else:
+            print(f"Computing embeddings with {self.embedding_model}...")
+            all_embeddings = self._compute_embeddings(sentences)
+            torch.save(all_embeddings, embeddings_cache)
+            print(f"Cached embeddings to {embeddings_cache}")
+
+        data_list = []
+        skipped = 0
+        max_model_len = tokenizer.model_max_length
+
+        for sent_idx, sentence in enumerate(tqdm(sentences, desc="Building graphs (with tokens)")):
+            words = sentence['words']
+            n_words = len(words)
+
+            if n_words > self.max_seq_len:
+                skipped += 1
+                continue
+
+            X = all_embeddings[sent_idx]
+            if X is None:
+                skipped += 1
+                continue
+            X = X[:n_words]
+            if X.shape[0] != n_words:
+                skipped += 1
+                continue
+
+            # ------------------------------------------------------------------
+            # Tokenize and build word-boundary info for online re-embedding
+            # ------------------------------------------------------------------
+            word_ids_to_subword_ids = []
+            all_subwords = [tokenizer.cls_token_id]
+
+            for word in words:
+                subword_ids = tokenizer.encode(word, add_special_tokens=False)
+                word_ids_to_subword_ids.append(
+                    list(range(len(all_subwords), len(all_subwords) + len(subword_ids)))
+                )
+                all_subwords.extend(subword_ids)
+
+            all_subwords.append(tokenizer.sep_token_id)
+
+            if len(all_subwords) > max_model_len:
+                all_subwords = all_subwords[:max_model_len - 1] + [tokenizer.sep_token_id]
+
+            seq_len = len(all_subwords)
+
+            # Pad input_ids to max_model_len so that all Data objects have the
+            # same-length tensor → PyG batch collation gives a regular 2D block.
+            pad_len = max_model_len - seq_len
+            pad_id  = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+            padded_input_ids = all_subwords + [pad_id] * pad_len
+            padded_attn_mask = [1] * seq_len + [0] * pad_len
+
+            input_ids      = torch.tensor(padded_input_ids, dtype=torch.long)  # (max_model_len,)
+            attention_mask = torch.tensor(padded_attn_mask, dtype=torch.long)  # (max_model_len,)
+
+            # word_spans: (N, 2) — [start, end) subword indices per word
+            # We store start/end as two tensors so PyG collation works fine.
+            word_starts = torch.zeros(n_words, dtype=torch.long)
+            word_ends   = torch.zeros(n_words, dtype=torch.long)
+            for wi, subword_ids_list in enumerate(word_ids_to_subword_ids):
+                valid = [i for i in subword_ids_list if i < seq_len]
+                if valid:
+                    word_starts[wi] = valid[0]
+                    word_ends[wi]   = valid[-1] + 1   # exclusive end
+                else:
+                    # Fallback: subwords were truncated — mark as invalid (0, 0)
+                    word_starts[wi] = 0
+                    word_ends[wi]   = 0
+
+            # ------------------------------------------------------------------
+            # Build edges (identical to parent class)
+            # ------------------------------------------------------------------
+            edge_index_list = []
+            edge_attr_list = []
+            predicate_mask = torch.zeros(n_words, dtype=torch.bool)
+
+            for pred_info in sentence.get('predicates', []):
+                pred_idx = pred_info['predicate_index']
+                if pred_idx >= n_words:
+                    continue
+                predicate_mask[pred_idx] = True
+
+                for arg in pred_info.get('argument_spans', []):
+                    arg_idx = arg['token_index']
+                    role = arg['role']
+                    if arg_idx >= n_words:
+                        continue
+                    if role not in self.role_to_idx:
+                        continue
+                    role_idx = self.role_to_idx[role]
+                    edge_index_list.append([pred_idx, arg_idx])
+                    edge_attr_list.append(role_idx)
+
+            if len(edge_index_list) > 0:
+                edge_index = torch.tensor(edge_index_list, dtype=torch.long).T
+                edge_attr = F.one_hot(
+                    torch.tensor(edge_attr_list, dtype=torch.long),
+                    num_classes=self.num_edge_classes
+                ).float()
+            else:
+                edge_index = torch.zeros((2, 0), dtype=torch.long)
+                edge_attr = torch.zeros((0, self.num_edge_classes), dtype=torch.float)
+
+            y = torch.zeros(1, 0)
+
+            data = Data(
+                x=X.clone(),                   # cached embeddings (N, 768) — stage-1 fallback
+                edge_index=edge_index,
+                edge_attr=edge_attr,
+                y=y,
+                predicate_mask=predicate_mask,
+                # --- online-embedding extras ---
+                input_ids=input_ids,           # (seq_len,)  — token ids
+                attention_mask=attention_mask, # (seq_len,)  — attention mask
+                word_starts=word_starts,       # (N,)        — first subword idx per word
+                word_ends=word_ends,           # (N,)        — last+1 subword idx per word
+            )
+            data_list.append(data)
+
+        print(f"Built {len(data_list)} graph samples with tokens ({skipped} sentences skipped)")
+        torch.save(self.collate(data_list), self.processed_paths[0])
+
+
 class SRLDataModule(LightningDataset):
-    """DataModule that loads PropBank SRL data with train/val/test splits."""
+    """DataModule that loads PropBank SRL data with train/val/test splits.
+
+    When ``cfg.train.joint_finetune_epoch`` is set, the datamodule uses
+    ``SRLGraphDatasetWithTokens`` so that the embedding model can be
+    fine-tuned jointly with the GraphTransformer in stage 2.
+    """
 
     def __init__(self, cfg):
         dataset_cfg = cfg.dataset
@@ -255,6 +436,13 @@ class SRLDataModule(LightningDataset):
         embedding_model = getattr(dataset_cfg, 'embedding_model', 'FacebookAI/xlm-roberta-base')
         embedding_dim = getattr(dataset_cfg, 'embedding_dim', 768)
 
+        # Use token-storing dataset if joint fine-tuning is requested
+        joint_finetune_epoch = getattr(cfg.train, 'joint_finetune_epoch', None)
+        DatasetClass = SRLGraphDatasetWithTokens if joint_finetune_epoch is not None else SRLGraphDataset
+        if joint_finetune_epoch is not None:
+            print(f"[Joint Fine-tuning] Using SRLGraphDatasetWithTokens — "
+                  f"embedding model will be unfrozen at epoch {joint_finetune_epoch}.")
+
         # Check if val_file and test_file are specified or if they exist in dataset directory
         val_file = getattr(dataset_cfg, 'val_file', None)
         if val_file is None and (data_dir / 'val.jsonl').exists():
@@ -265,7 +453,7 @@ class SRLDataModule(LightningDataset):
 
         if val_file is not None:
             print(f"Loading separate datasets: train={dataset_cfg.train_file}, val={val_file}, test={test_file}")
-            train_dataset = SRLGraphDataset(
+            train_dataset = DatasetClass(
                 root=processed_root,
                 jsonl_path=str(data_dir / dataset_cfg.train_file),
                 roles_path=roles_path,
@@ -274,7 +462,7 @@ class SRLDataModule(LightningDataset):
                 embedding_dim=embedding_dim,
                 split='train',
             )
-            val_dataset = SRLGraphDataset(
+            val_dataset = DatasetClass(
                 root=processed_root,
                 jsonl_path=str(data_dir / val_file),
                 roles_path=roles_path,
@@ -284,7 +472,7 @@ class SRLDataModule(LightningDataset):
                 split='val',
             )
             if test_file is not None:
-                test_dataset = SRLGraphDataset(
+                test_dataset = DatasetClass(
                     root=processed_root,
                     jsonl_path=str(data_dir / test_file),
                     roles_path=roles_path,
@@ -301,7 +489,7 @@ class SRLDataModule(LightningDataset):
         else:
             print("No separate val_file found. Splitting train_file randomly.")
             jsonl_path = str(data_dir / dataset_cfg.train_file)
-            full_dataset = SRLGraphDataset(
+            full_dataset = DatasetClass(
                 root=processed_root,
                 jsonl_path=jsonl_path,
                 roles_path=roles_path,

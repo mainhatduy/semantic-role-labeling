@@ -1,0 +1,52 @@
+# @package _global_
+#
+# Stage-2: Joint fine-tuning of GraphTransformer + Embedding Model
+#
+# Usage:
+#   python src/main.py +experiment=srl_stage2 \
+#       general.stage2_resume='outputs/2026-06-01/12-24-48-srl_edge_diffusion/checkpoints/srl_edge_diffusion/epoch=XXX.ckpt'
+#
+# The stage2_resume path can be:
+#   - Absolute path:  /full/path/to/epoch=42.ckpt
+#   - Relative path:  outputs/.../checkpoints/.../epoch=42.ckpt  (relative to project root)
+
+general:
+    name: 'srl_stage2_joint'
+    gpus: 1
+    wandb: 'online'
+    test_only: null
+    resume: null
+    stage2_resume: null   # ← SET THIS to your converged stage-1 checkpoint
+    check_val_every_n_epochs: 2
+    sample_every_val: 10
+    samples_to_generate: 32
+    samples_to_save: 10
+    chains_to_save: 1
+    log_every_steps: 50
+
+train:
+    n_epochs: 200         # Additional epochs for joint fine-tuning
+    batch_size: 16        # Smaller batch — embedding model uses more VRAM
+    save_model: True
+    lr: 1e-4              # Base LR for GraphTransformer
+    num_workers: 4
+
+    # --- Unfreeze immediately (stage-1 already converged) ---
+    joint_finetune_epoch: 0
+    joint_finetune_lr_ratio: 0.1   # Embedding LR = 1e-5
+    joint_finetune_warmup_epochs: 1
+
+model:
+    n_layers: 6
+    type: 'discrete'
+    transition: 'marginal'
+    diffusion_steps: 100
+    diffusion_noise_schedule: 'cosine'
+    extra_features: null
+    edge_only: true
+
+    hidden_mlp_dims: {'X': 256, 'E': 128, 'y': 128}
+    hidden_dims: {'dx': 256, 'de': 128, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 128, 'dim_ffy': 128}
+
+dataset:
+    name: 'srl_propbank'

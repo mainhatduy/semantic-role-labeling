@@ -92,6 +92,14 @@ python src/main.py +experiment=srl general.resume=checkpoints/srl_edge_diffusion
 ```
 *(Thay thế `epoch=X.ckpt` bằng checkpoint thực tế trong thư mục `checkpoints/srl_edge_diffusion/`)*
 
+
+```bash
+cd /teamspace/studios/this_studio/semantic-role-labeling/models/MySRLGraph
+
+PYTHONPATH=. python src/main.py +experiment=srl_stage2 \
+    'general.stage2_resume="/teamspace/studios/this_studio/semantic-role-labeling/models/outputs/2026-06-01/12-24-48-srl_edge_diffusion/checkpoints/srl_edge_diffusion/epoch=87.ckpt"'
+
+```
 ---
 
 ## 4. Kiểm tra Kết quả (Evaluation)

@@ -192,6 +192,35 @@ def main(cfg: DictConfig):
     else:
         model = LiftedDenoisingDiffusion(cfg=cfg, **model_kwargs)
 
+    # --- Stage-2 resume: load converged stage-1 weights into new model ---
+    stage2_ckpt = getattr(cfg.general, 'stage2_resume', None)
+    if stage2_ckpt is not None:
+        current_path = os.path.dirname(os.path.realpath(__file__))
+        root_dir = current_path.split('outputs')[0]
+        ckpt_path = os.path.join(root_dir, stage2_ckpt) if not os.path.isabs(stage2_ckpt) else stage2_ckpt
+
+        print(f"\n{'='*60}")
+        print(f"[Stage-2] Loading converged stage-1 checkpoint:")
+        print(f"  {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        old_state = ckpt['state_dict']
+
+        # Filter out online_embedder keys — they weren't in stage-1
+        load_state = {k: v for k, v in old_state.items()
+                      if not k.startswith('online_embedder.')}
+
+        missing, unexpected = model.load_state_dict(load_state, strict=False)
+        # Expected missing: all online_embedder.* keys (kept at pretrained init)
+        emb_missing = [k for k in missing if k.startswith('online_embedder.')]
+        other_missing = [k for k in missing if not k.startswith('online_embedder.')]
+        print(f"  Loaded {len(load_state)} keys from checkpoint")
+        print(f"  Embedding model keys (pretrained init): {len(emb_missing)}")
+        if other_missing:
+            print(f"  [WARN] Other missing keys: {other_missing}")
+        if unexpected:
+            print(f"  [WARN] Unexpected keys: {unexpected}")
+        print(f"{'='*60}\n")
+
     callbacks = []
     if cfg.train.save_model:
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",

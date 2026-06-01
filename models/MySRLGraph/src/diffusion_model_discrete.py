@@ -15,6 +15,89 @@ from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from src import utils
 
 
+class OnlineEmbedder(nn.Module):
+    """Wraps a HuggingFace AutoModel to compute differentiable word-level
+    embeddings from pre-stored token ids.
+
+    Expects a batch that has been collated by PyG/PyTorch Geometric and
+    therefore has *flat* ``input_ids`` / ``attention_mask`` tensors along
+    with ``word_starts`` / ``word_ends`` (first / exclusive-end subword
+    position per word) and the standard ``batch`` index vector.
+
+    The embedder is constructed in *frozen* state; call ``unfreeze()`` to
+    enable gradient flow into the transformer weights.
+    """
+
+    def __init__(self, model_name: str, embedding_dim: int = 768):
+        super().__init__()
+        from transformers import AutoModel
+        self.embedding_dim = embedding_dim
+        self.transformer = AutoModel.from_pretrained(model_name)
+        # Start frozen — stage-1 training uses cached embeddings
+        self._set_frozen(True)
+        self._active = False   # switched to True at joint_finetune_epoch
+
+    # ------------------------------------------------------------------
+    def _set_frozen(self, frozen: bool):
+        for p in self.transformer.parameters():
+            p.requires_grad = not frozen
+
+    def freeze(self):
+        self._set_frozen(True)
+        self._active = False
+
+    def unfreeze(self):
+        self._set_frozen(False)
+        self._active = True
+        self.transformer.train()
+
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    # ------------------------------------------------------------------
+    def forward(self, input_ids, attention_mask, word_starts, word_ends, batch_idx):
+        """
+        Args:
+            input_ids      (bs * max_model_len,) – flat, ALL padded to same length
+            attention_mask (bs * max_model_len,) – 1 for real tokens, 0 for padding
+            word_starts    (total_words,)         – first subword idx per word
+            word_ends      (total_words,)         – exclusive-end subword idx per word
+            batch_idx      (total_words,)         – sample index per word
+        Returns:
+            word_embeddings (total_words, embedding_dim)
+
+        Because SRLGraphDatasetWithTokens pads every sequence to the same
+        tokenizer.model_max_length, PyG batch collation stacks input_ids as
+        a flat (bs * L,) tensor which we safely view as (bs, L).
+        """
+        bs = int(batch_idx.max().item()) + 1
+        device = input_ids.device
+
+        total_tokens      = input_ids.size(0)
+        tokens_per_sample = total_tokens // bs          # = max_model_len (uniform)
+        input_ids_2d      = input_ids.view(bs, tokens_per_sample)
+        attention_mask_2d = attention_mask.view(bs, tokens_per_sample)
+
+        outputs = self.transformer(
+            input_ids=input_ids_2d,
+            attention_mask=attention_mask_2d,
+        )
+        hidden_states = outputs.last_hidden_state  # (bs, L, H)
+
+        # Average subword tokens → word-level embeddings
+        total_words = word_starts.size(0)
+        word_embs   = torch.zeros(total_words, self.embedding_dim,
+                                  device=device, dtype=hidden_states.dtype)
+        for wi in range(total_words):
+            b = int(batch_idx[wi].item())
+            s = int(word_starts[wi].item())
+            e = int(word_ends[wi].item())
+            if e > s:
+                word_embs[wi] = hidden_states[b, s:e].mean(dim=0)
+        return word_embs
+
+
 class DiscreteDenoisingDiffusion(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
                  domain_features):
@@ -69,6 +152,20 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                       act_fn_in=nn.ReLU(),
                                       act_fn_out=nn.ReLU())
 
+        # --- Joint fine-tuning: online embedding model (starts frozen) ---
+        self._joint_finetune_epoch = getattr(cfg.train, 'joint_finetune_epoch', None)
+        self._joint_finetune_lr_ratio = getattr(cfg.train, 'joint_finetune_lr_ratio', 0.1)
+        self._joint_finetune_warmup = getattr(cfg.train, 'joint_finetune_warmup_epochs', 1)
+        self._in_joint_stage = False
+        if self._joint_finetune_epoch is not None:
+            embedding_model_name = getattr(cfg.dataset, 'embedding_model', 'FacebookAI/xlm-roberta-base')
+            embedding_dim        = getattr(cfg.dataset, 'embedding_dim', 768)
+            self.online_embedder = OnlineEmbedder(embedding_model_name, embedding_dim)
+            print(f"[Joint Fine-tuning] OnlineEmbedder created (frozen). "
+                  f"Will unfreeze at epoch {self._joint_finetune_epoch}.")
+        else:
+            self.online_embedder = None
+
         self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
                                                               timesteps=cfg.model.diffusion_steps)
 
@@ -113,14 +210,32 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.best_val_nll = 1e8
         self.val_counter = 0
 
+    def _compute_online_embeddings(self, data):
+        """Re-compute node embeddings online using the unfrozen embedding model.
+        Returns a new data.x tensor with gradients attached.
+        """
+        word_embs = self.online_embedder(
+            input_ids=data.input_ids,
+            attention_mask=data.attention_mask,
+            word_starts=data.word_starts,
+            word_ends=data.word_ends,
+            batch_idx=data.batch,
+        )  # (total_words, 768)
+        return word_embs
+
     def training_step(self, data, i):
         if data.edge_index.numel() == 0:
             self.print("Found a batch with no edges. Skipping.")
             return
+
+        # --- Stage-2: replace cached embeddings with online re-computed ones ---
+        if self._in_joint_stage and self.online_embedder is not None:
+            data.x = self._compute_online_embeddings(data)
+
         dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
         dense_data = dense_data.mask(node_mask)
         X, E = dense_data.X, dense_data.E
-        
+
         if getattr(self.cfg.model, 'edge_only', False):
             noisy_data = self.apply_noise_edge_only(X, E, data.y, node_mask)
             extra_data = self.compute_extra_data(noisy_data)
@@ -142,8 +257,20 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return {'loss': loss}
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.cfg.train.lr, amsgrad=True,
-                                 weight_decay=self.cfg.train.weight_decay)
+        base_lr = self.cfg.train.lr
+        wd      = self.cfg.train.weight_decay
+        # Only GraphTransformer params optimized in stage-1
+        param_groups = [
+            {'params': self.model.parameters(), 'lr': base_lr, 'name': 'graph_transformer'},
+        ]
+        if self.online_embedder is not None:
+            emb_lr = base_lr * self._joint_finetune_lr_ratio
+            param_groups.append({
+                'params': self.online_embedder.parameters(),
+                'lr': emb_lr,
+                'name': 'embedding_model',
+            })
+        return torch.optim.AdamW(param_groups, amsgrad=True, weight_decay=wd)
 
     def on_fit_start(self) -> None:
         self.train_iterations = len(self.trainer.datamodule.train_dataloader())
@@ -156,6 +283,22 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.start_epoch_time = time.time()
         self.train_loss.reset()
         self.train_metrics.reset()
+
+        # --- Switch to stage-2 joint fine-tuning when target epoch is reached ---
+        if (
+            self._joint_finetune_epoch is not None
+            and not self._in_joint_stage
+            and self.current_epoch >= self._joint_finetune_epoch
+        ):
+            self._in_joint_stage = True
+            self.online_embedder.unfreeze()
+            self.print(
+                f"[Joint Fine-tuning] Epoch {self.current_epoch}: "
+                f"Embedding model UNFROZEN. "
+                f"LR ratio = {self._joint_finetune_lr_ratio}."
+            )
+            if wandb.run:
+                wandb.log({'joint_finetune_started': self.current_epoch})
 
     def on_train_epoch_end(self) -> None:
         to_log = self.train_loss.log_epoch_metrics()

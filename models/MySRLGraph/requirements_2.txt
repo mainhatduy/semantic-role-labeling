@@ -15,7 +15,7 @@ attrs==26.1.0
 babel==2.18.0
 backoff==2.2.1
 beautifulsoup4==4.14.3
-blake3==1.0.8
+blake3==1.0.8torch_geometric
 bleach==6.3.0
 boto3==1.42.72
 botocore==1.42.72
@@ -114,7 +114,6 @@ nvidia-nvtx-cu12==12.8.90
 obstore==0.9.2
 omegaconf==2.3.0
 overrides==7.7.0
-packaging @ file:///home/task_176104874243446/conda-bld/packaging_1761049080023/work
 pandas==2.1.4
 pandocfilters==1.5.1
 parso==0.8.6
