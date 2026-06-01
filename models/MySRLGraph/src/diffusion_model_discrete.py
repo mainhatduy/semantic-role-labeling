@@ -159,10 +159,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                       f" -- {time.time() - self.start_epoch_time:.1f}s ")
         epoch_at_metrics, epoch_bond_metrics = self.train_metrics.log_epoch_metrics()
         self.print(f"Epoch {self.current_epoch}: {epoch_at_metrics} -- {epoch_bond_metrics}")
-        if torch.cuda.is_available():
-            print(torch.cuda.memory_summary())
-        else:
-            print("CUDA is not available. Skipping memory summary.")
+        # if torch.cuda.is_available():
+        #     print(torch.cuda.memory_summary())
+        # else:
+        #     print("CUDA is not available. Skipping memory summary.")
 
     def on_validation_epoch_start(self) -> None:
         self.val_nll.reset()
@@ -185,6 +185,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return {'loss': nll}
 
     def on_validation_epoch_end(self) -> None:
+        if self.current_epoch == 0:
+            return
         metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
                    self.val_X_logp.compute(), self.val_E_logp.compute()]
         if wandb.run:
