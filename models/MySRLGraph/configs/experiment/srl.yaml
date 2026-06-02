@@ -4,7 +4,7 @@ general:
     gpus: 1
     wandb: 'online'
     test_only: null
-    check_val_every_n_epochs: 2
+    check_val_every_n_epochs: 5
     sample_every_val: 10
     samples_to_generate: 32
     samples_to_save: 10
@@ -18,11 +18,7 @@ train:
     lr: 1e-4
     num_workers: 4
 
-    # --- Two-stage joint fine-tuning ---
-    # Set joint_finetune_epoch to the epoch at which the embedding model is
-    # unfrozen for joint training with the GraphTransformer.
-    # Leave as null to disable (stage-1 only, cached embeddings).
-    joint_finetune_epoch: null        # e.g. 200 — unfreeze at epoch 200
+    joint_finetune_epoch: 90        # e.g. 200 — unfreeze at epoch 200
     joint_finetune_lr_ratio: 0.1     # embedding LR = base_lr * ratio (e.g. 1e-5)
     joint_finetune_warmup_epochs: 1  # (reserved for future LR warm-up)
 

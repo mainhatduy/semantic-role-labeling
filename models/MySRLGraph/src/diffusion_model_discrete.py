@@ -336,8 +336,13 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     def on_validation_epoch_end(self) -> None:
         if self.current_epoch == 0:
             return
-        metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
-                   self.val_X_logp.compute(), self.val_E_logp.compute()]
+        
+        if getattr(self.cfg.model, 'edge_only', False):
+            metrics = [self.val_nll.compute(), torch.tensor(float('nan')), self.val_E_kl.compute() * self.T,
+                       torch.tensor(float('nan')), self.val_E_logp.compute()]
+        else:
+            metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
+                       self.val_X_logp.compute(), self.val_E_logp.compute()]
         if wandb.run:
             wandb.log({"val/epoch_NLL": metrics[0],
                        "val/X_kl": metrics[1],
@@ -410,8 +415,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
     def on_test_epoch_end(self) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
-        metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
-                   self.test_X_logp.compute(), self.test_E_logp.compute()]
+        if getattr(self.cfg.model, 'edge_only', False):
+            metrics = [self.test_nll.compute(), torch.tensor(float('nan')), self.test_E_kl.compute(),
+                       torch.tensor(float('nan')), self.test_E_logp.compute()]
+        else:
+            metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
+                       self.test_X_logp.compute(), self.test_E_logp.compute()]
         if wandb.run:
             wandb.log({"test/epoch_NLL": metrics[0],
                        "test/X_kl": metrics[1],
@@ -735,7 +744,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             kl_prior = self.kl_prior_edge_only(X, E, node_mask)
             loss_all_t = self.compute_Lt_edge_only(X, E, y, pred, noisy_data, node_mask, test)
             prob0 = self.reconstruction_logp_edge_only(t, X, E, node_mask)
-            loss_term_0 = self.val_E_logp(E * prob0.E.log())
+            loss_term_0 = (self.test_E_logp if test else self.val_E_logp)(E * prob0.E.log())
             nlls = - log_pN + kl_prior + loss_all_t - loss_term_0
             assert len(nlls.shape) == 1, f'{nlls.shape} has more than only batch dim.'
         else:
@@ -749,7 +758,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             # Compute L0 term : -log p (X, E, y | z_0) = reconstruction loss
             prob0 = self.reconstruction_logp(t, X, E, node_mask)
 
-            loss_term_0 = self.val_X_logp(X * prob0.X.log()) + self.val_E_logp(E * prob0.E.log())
+            loss_term_0 = (self.test_X_logp if test else self.val_X_logp)(X * prob0.X.log()) + \
+                          (self.test_E_logp if test else self.val_E_logp)(E * prob0.E.log())
 
             # Combine terms
             nlls = - log_pN + kl_prior + loss_all_t - loss_term_0
