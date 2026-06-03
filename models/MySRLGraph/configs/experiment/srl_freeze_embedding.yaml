@@ -4,7 +4,7 @@ general:
     gpus: 1
     wandb: 'online'
     test_only: null
-    check_val_every_n_epochs: 2
+    check_val_every_n_epochs: 10
     sample_every_val: 10
     samples_to_generate: 32
     samples_to_save: 10

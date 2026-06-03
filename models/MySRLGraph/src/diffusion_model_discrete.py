@@ -155,7 +155,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # --- Joint fine-tuning: online embedding model (starts frozen) ---
         self._joint_finetune_epoch = getattr(cfg.train, 'joint_finetune_epoch', None)
         self._joint_finetune_lr_ratio = getattr(cfg.train, 'joint_finetune_lr_ratio', 0.1)
-        self._joint_finetune_warmup = getattr(cfg.train, 'joint_finetune_warmup_epochs', 1)
+        self._joint_finetune_warmup_epochs = getattr(cfg.train, 'joint_finetune_warmup_epochs', 1)
         self._in_joint_stage = False
         if self._joint_finetune_epoch is not None:
             embedding_model_name = getattr(cfg.dataset, 'embedding_model', 'FacebookAI/xlm-roberta-base')
@@ -299,6 +299,60 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             )
             if wandb.run:
                 wandb.log({'joint_finetune_started': self.current_epoch})
+
+        # --- Apply warmup learning rate if in joint training stage ---
+            self._joint_finetune_warmup()
+
+    def _joint_finetune_warmup(self) -> None:
+        """Dynamically adjusts the learning rate of the embedding model group
+        for linear warmup during the initial joint fine-tuning epochs.
+        """
+        if self.online_embedder is None or self._joint_finetune_epoch is None:
+            return
+
+        base_lr = self.cfg.train.lr
+        target_lr = base_lr * self._joint_finetune_lr_ratio
+
+        if not self._in_joint_stage:
+            current_lr = 0.0
+        else:
+            elapsed = self.current_epoch - self._joint_finetune_epoch
+            warmup_epochs = self._joint_finetune_warmup_epochs
+            if warmup_epochs <= 0:
+                current_lr = target_lr
+            else:
+                factor = min(1.0, (elapsed + 1) / warmup_epochs)
+                current_lr = target_lr * factor
+
+        # Safely update the parameter group 'embedding_model' in the optimizer
+        optimizers = []
+        try:
+            opts = self.optimizers()
+            if isinstance(opts, list):
+                optimizers.extend(opts)
+            else:
+                optimizers.append(opts)
+        except Exception:
+            pass
+
+        # Also fallback to trainer.optimizers just in case
+        if hasattr(self, 'trainer') and self.trainer is not None and hasattr(self.trainer, 'optimizers'):
+            for opt in self.trainer.optimizers:
+                if opt not in optimizers:
+                    optimizers.append(opt)
+
+        updated = False
+        for opt in optimizers:
+            if hasattr(opt, 'param_groups'):
+                for param_group in opt.param_groups:
+                    if param_group.get('name') == 'embedding_model':
+                        param_group['lr'] = current_lr
+                        updated = True
+
+        if updated:
+            self.print(f"[Joint Warmup] Epoch {self.current_epoch}: embedding_model LR set to {current_lr:.2e}")
+            if wandb.run:
+                wandb.log({'lr/embedding_model': current_lr}, commit=False)
 
     def on_train_epoch_end(self) -> None:
         to_log = self.train_loss.log_epoch_metrics()
