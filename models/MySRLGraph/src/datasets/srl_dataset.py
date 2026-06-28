@@ -77,6 +77,10 @@ class SRLGraphDataset(InMemoryDataset):
 
         super().__init__(root, transform, pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
+        # Note: Keeping dataset tensors on CPU memory to prevent slow GPU slicing and collation bottlenecks.
+        # if torch.cuda.is_available():
+        #     print(f"[{self.split.capitalize()} Dataset] Loading all data tensors directly to GPU VRAM...")
+        #     self._data = self._data.to('cuda')
 
     @property
     def processed_file_names(self):
@@ -523,7 +527,7 @@ class SRLDataModule(LightningDataset):
             test_dataset=test_dataset,
             batch_size=cfg.train.batch_size if 'debug' not in cfg.general.name else 2,
             num_workers=cfg.train.num_workers,
-            pin_memory=getattr(cfg.dataset, 'pin_memory', False),
+            pin_memory=getattr(cfg.dataset, 'pin_memory', True) if torch.cuda.is_available() else False,
         )
 
     def node_counts(self, max_nodes_possible=300):
@@ -545,7 +549,8 @@ class SRLDataModule(LightningDataset):
     def edge_counts(self):
         """Compute distribution of edge types across all training data."""
         num_classes = self.num_edge_classes
-        d = torch.zeros(num_classes, dtype=torch.float)
+        device = self.full_dataset[0].edge_attr.device if len(self.full_dataset) > 0 else 'cpu'
+        d = torch.zeros(num_classes, dtype=torch.float, device=device)
 
         for data in self.full_dataset:
             n = data.x.shape[0]
@@ -562,7 +567,7 @@ class SRLDataModule(LightningDataset):
                 d[0] += all_pairs
 
         d = d / d.sum()
-        return d
+        return d.cpu()
 
 
 class SRLDatasetInfos:

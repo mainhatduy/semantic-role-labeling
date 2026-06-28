@@ -1,6 +1,7 @@
 import torch
 from torch import Tensor
 import torch.nn as nn
+import torch.nn.functional as F
 from torchmetrics import Metric, MeanSquaredError, MetricCollection
 import time
 import wandb
@@ -92,9 +93,23 @@ class TrainLossDiscrete(nn.Module):
         flat_true_E = true_E[mask_E, :]
         flat_pred_E = masked_pred_E[mask_E, :]
 
-        loss_X = self.node_loss(flat_pred_X, flat_true_X) if true_X.numel() > 0 else 0.0
-        loss_E = self.edge_loss(flat_pred_E, flat_true_E) if true_E.numel() > 0 else 0.0
-        loss_y = self.y_loss(pred_y, true_y) if true_y.numel() > 0 else 0.0
+        if flat_true_X.numel() > 0:
+            loss_X = F.cross_entropy(flat_pred_X, torch.argmax(flat_true_X, dim=-1), reduction='mean')
+            self.node_loss.update(flat_pred_X.detach(), flat_true_X.detach())
+        else:
+            loss_X = 0.0
+
+        if flat_true_E.numel() > 0:
+            loss_E = F.cross_entropy(flat_pred_E, torch.argmax(flat_true_E, dim=-1), reduction='mean')
+            self.edge_loss.update(flat_pred_E.detach(), flat_true_E.detach())
+        else:
+            loss_E = 0.0
+
+        if true_y.numel() > 0:
+            loss_y = F.cross_entropy(pred_y, torch.argmax(true_y, dim=-1), reduction='mean')
+            self.y_loss.update(pred_y.detach(), true_y.detach())
+        else:
+            loss_y = 0.0
 
         if log:
             to_log = {"train_loss/batch_CE": (loss_X + loss_E + loss_y).detach(),
@@ -140,7 +155,23 @@ class TrainLossEdgeOnly(nn.Module):
         flat_true_E = true_E[mask_E, :]
         flat_pred_E = masked_pred_E[mask_E, :]
 
-        loss_E = self.edge_loss(flat_pred_E, flat_true_E) if flat_true_E.numel() > 0 else 0.0
+        if flat_true_E.numel() > 0:
+            # Compute Focal Loss directly for the batch (with gradients)
+            target_indices = torch.argmax(flat_true_E, dim=-1)
+            ce_loss = F.cross_entropy(flat_pred_E, target_indices, reduction="none")
+            pt = torch.exp(-ce_loss)
+            focal_weight = (1.0 - pt) ** self.edge_loss.gamma
+            if self.edge_loss.alpha is not None:
+                alpha_t = self.edge_loss.alpha[target_indices]
+                focal_loss = alpha_t * focal_weight * ce_loss
+            else:
+                focal_loss = focal_weight * ce_loss
+            loss_E = focal_loss.mean()
+            
+            # Update metric state (with detached tensors)
+            self.edge_loss.update(flat_pred_E.detach(), flat_true_E.detach())
+        else:
+            loss_E = 0.0
 
         if log:
             to_log = {"train_loss/batch_CE": loss_E.detach() if isinstance(loss_E, torch.Tensor) else loss_E,

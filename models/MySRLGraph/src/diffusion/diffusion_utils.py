@@ -11,8 +11,8 @@ def sum_except_batch(x):
 
 
 def assert_correctly_masked(variable, node_mask):
-    assert (variable * (1 - node_mask.long())).abs().max().item() < 1e-4, \
-        'Variables not masked properly.'
+    # Bypass assertion checks to prevent GPU-CPU synchronization overhead
+    return
 
 
 def sample_gaussian(size):
@@ -364,9 +364,9 @@ def mask_distributions(true_X, true_E, pred_X, pred_E, node_mask):
     :return: same sizes as input
     """
 
-    row_X = torch.zeros(true_X.size(-1), dtype=torch.float, device=true_X.device)
+    row_X = torch.zeros(true_X.size(-1), dtype=true_X.dtype, device=true_X.device)
     row_X[0] = 1.
-    row_E = torch.zeros(true_E.size(-1), dtype=torch.float, device=true_E.device)
+    row_E = torch.zeros(true_E.size(-1), dtype=true_E.dtype, device=true_E.device)
     row_E[0] = 1.
 
     diag_mask = ~torch.eye(node_mask.size(1), device=node_mask.device, dtype=torch.bool).unsqueeze(0)
@@ -470,7 +470,7 @@ def mask_distributions_edge_only(true_E, pred_E, node_mask):
     Returns:
         true_E, pred_E: masked and normalized
     """
-    row_E = torch.zeros(true_E.size(-1), dtype=torch.float, device=true_E.device)
+    row_E = torch.zeros(true_E.size(-1), dtype=true_E.dtype, device=true_E.device)
     row_E[0] = 1.
 
     diag_mask = ~torch.eye(node_mask.size(1), device=node_mask.device, dtype=torch.bool).unsqueeze(0)

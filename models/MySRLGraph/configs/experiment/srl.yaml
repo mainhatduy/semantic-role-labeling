@@ -13,10 +13,11 @@ general:
 
 train:
     n_epochs: 500
-    batch_size: 32
+    batch_size: 64
     save_model: True
     lr: 1e-4
     num_workers: 4
+    precision: '16-mixed'
 
     joint_finetune_epoch: 80        # e.g. 200 — unfreeze at epoch 200
     joint_finetune_lr_ratio: 0.01     # embedding LR = base_lr * ratio (e.g. 1e-5)
