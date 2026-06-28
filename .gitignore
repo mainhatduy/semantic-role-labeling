@@ -1,7 +1,28 @@
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Môi trường ảo (Virtual environments)
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Project-specific ignores
 dataset/*
-*.venv
 models/DiGress
-*__pycache__
 models/MySRLGraph/processed_data/*
 models/outputs/*
 .env
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# IDEs & OS files
+.vscode/
+.idea/
+.DS_Store
+*.swp
